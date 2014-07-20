@@ -2,7 +2,7 @@ unit interpreter;
 
 interface
 
-uses SysUtils, Classes, hashmap, parser, iterators, lookup, strsim, csv;
+uses SysUtils, Classes, hashmap, parser, iterators, lookup, strsim, csv, ShellAPI;
 
 type
   TMailInfo = packed record
@@ -28,6 +28,7 @@ type
   TWAInterpreter = class(TObject)
   private
     // Event list
+    Immediate: Boolean;
     FOnReferrer: TSetBoolEvent;
     FOnRef: TSetStringEvent;
     FOnCookies: TSetBoolEvent;
@@ -47,6 +48,7 @@ type
     FParserList: TList;
     FParser: PWAParser;
     FVars: TStringHashTable;
+    FStreams: TObjectHashTable;
     FTok: Integer;
     FVerbose: Boolean;
     procedure DoLookup (Fn: String; var Fields: TStringList; key,value: String);
@@ -60,6 +62,7 @@ type
     procedure ExecSet;
     procedure ExecCookies;
     procedure ExecAgent;
+    function ExecRealCSV: TRealCSVIterator;
     function ExecCSV: TCSVIterator;
     function ExecText: TTextIterator;
     procedure ExecLookup;
@@ -86,12 +89,21 @@ type
     procedure ExecFile;
     procedure ExecParse;
     procedure ExecDump;
+    procedure ExecPrompt;
+    procedure ExecRun;
+    procedure ExecFReadLine;
+    procedure ExecFWriteLine;
+    procedure ExecFSeek;
     procedure VMsg (M: String; p: array of const);
   public
     constructor Create;
     destructor Destroy; override;
     procedure Execute (const Fn: String);
     procedure SetVariable (N, V: String);
+
+
+    procedure Interpret (const Line: String);
+    procedure BeginImmediate;
 
     property OnReferrer: TSetBoolEvent read FOnReferrer write FOnReferrer;
     property OnRef: TSetStringEvent read FOnRef write FOnRef;
@@ -117,6 +129,7 @@ const
   ERROR_STR = 'String expected';
   ERROR_BOOL = 'Boolean value `off` or `on` expected';
   ERROR_FILE = 'Filename expected';
+  ERROR_KW = 'Keyword expected';
 
 constructor TWAInterpreter.Create;
 begin
@@ -124,13 +137,16 @@ begin
   FVerbose := False;
   FParserList := TList.Create;
   FParser := nil;
+  Immediate := False;
   FVars := TStringHashTable.Create;
+  FStreams := TObjectHashTable.Create;
 end;
 
 destructor TWAInterpreter.Destroy;
 begin
   if FParser <> nil then FParser^.Free;
   FParserList.Free;
+  FStreams.Free;
   FVars.Free;
   inherited Destroy;
 end;
@@ -250,6 +266,12 @@ begin
     for j := 0 to sl^.Count-1 do begin
       FVars.Add((Iter as TCSVIterator).Fields[j], sl^.Strings[j]);
     end;
+  end else if Iter is TRealCSVIterator then begin
+    sl := (Iter as TRealCSVIterator).NextValueSet;
+    // Load all values from the fields into the var table...
+    for j := 0 to sl^.Count-1 do begin
+      FVars.Add((Iter as TRealCSVIterator).Fields[j], sl^.Strings[j]);
+    end;
   end else if Iter is TTextIterator then begin
     // Dump value from text file into variable associated with it...
     tmp := (Iter as TTextIterator).NextValueSet;
@@ -269,6 +291,7 @@ begin
       T_FOREACH: ExecForeach;
       else begin
         Error('Unknown statement');
+        Exit;
       end;
     end;
   end;
@@ -307,7 +330,7 @@ end;
 procedure TWAInterpreter.Error (const Msg: String);
 begin
   Writeln(Format('ERROR (line %d, char %d in "%s"): %s', [FParser^.Line+1, FParser^.Char, FParser^.Filename, Msg]));
-  Halt;
+  if not Immediate then Halt;
 end;
 
 function TWAInterpreter.TemplateStr (S: String; Explicit: Boolean): String;
@@ -361,10 +384,12 @@ begin
   buf := FParser^.GetString;
   Result := '';
   // Expect "
-  if (buf[1] <> '"') or (buf[Length(buf)] <> '"') then
+  if (buf[1] <> '"') or (buf[Length(buf)] <> '"') then begin
     Error('String builder could not determine beginning/end of string');
-
-  Result := TemplateStr(Copy(buf, 2, length(buf)-2));
+    Result := '';
+  end
+  else
+    Result := TemplateStr(Copy(buf, 2, length(buf)-2));
 end;
 
 procedure TWAInterpreter.ExecDump;
@@ -372,6 +397,132 @@ begin
   if Next <> T_STRING then Error(ERROR_STR);
   if Assigned(FOnDump) then FOnDump(BuildString);
   CheckEOL;
+end;
+
+procedure TWAInterpreter.ExecPrompt;
+var kw, msg, tmp: String;
+begin
+  if Next <> T_STRUCTVAR then Error(ERROR_KW);
+  kw := FParser^.GetString;
+  if Next <> T_STRING then Error(ERROR_STR);
+  msg := BuildString;
+  CheckEOL;
+  Write(msg);
+  Readln(tmp);
+  FVars.Add(kw, tmp);
+end;
+
+procedure TWAInterpreter.ExecRun;
+var execStr, execFile, execParams, execDir: String;
+begin
+  if Next <> T_STRING then Error(ERROR_STR);
+  execStr := BuildString;
+  CheckEOL;
+  execFile := ExtractFileName(execStr);
+  execDir := ExtractFilePath(execStr);
+  execParams := Copy(execStr, Length(execDir)+Length(execFile), Length(execStr)-Length(execDir)-Length(execFile));
+  ShellExecute(0, 'open', PAnsiChar(execFile), PAnsiChar(execParams), PAnsiChar(execDir), 1);
+end;
+
+procedure TWAInterpreter.ExecFReadLine;
+var kw,fn: String;
+    fsobj: TFileStream;
+    ch: Char;
+    line: String;
+begin
+  // Line variable
+  if Next <> T_STRUCTVAR then Error(ERROR_KW);
+  kw := FParser^.GetString;
+  // Filename
+  if Next <> T_STRING then Error(ERROR_STR);
+  fn := Lowercase(BuildString);
+  CheckEOL;
+  if not FStreams.Exists(fn) then begin
+    if (FileExists(fn)) then
+      fsobj := TFileStream.Create(fn, fmOpenReadWrite or fmShareDenyNone)
+    else
+      fsobj := TFileStream.Create(fn, fmCreate or fmOpenReadWrite or fmShareDenyNone);
+    FStreams.Add(fn, fsobj);
+  end else begin
+    fsobj := (FStreams.GetData(fn) as TFileStream);
+  end;
+  line := '';
+  // Read line
+  fsobj.Read(ch, 1);
+  while (fsobj.Position < fsobj.Size) and (ch <> #13) and (ch <> #10) do begin
+    line := line + ch;
+    fsobj.Read(ch, 1);
+  end;
+
+  // Skip whitespace for next line
+  while (fsobj.Position < fsobj.Size) and ((ch = #13) or (ch = #10)) do
+    fsobj.Read(ch, 1);
+
+  Self.SetVariable(kw, line);
+end;
+
+procedure TWAInterpreter.ExecFWriteLine;
+var fn, line: String;
+    fsobj: TFileStream;
+begin
+  if Next <> T_STRING then Error(ERROR_STR);
+  fn := Lowercase(BuildString);
+  if Next <> T_STRING then Error(ERROR_STR);
+  line := BuildString;
+  CheckEOL;
+
+  if not FStreams.Exists(fn) then begin
+    if (FileExists(fn)) then
+      fsobj := TFileStream.Create(fn, fmOpenReadWrite or fmShareDenyNone)
+    else
+      fsobj := TFileStream.Create(fn, fmCreate or fmOpenReadWrite or fmShareDenyNone);
+    FStreams.Add(fn, fsobj);
+  end else begin
+    fsobj := (FStreams.GetData(fn) as TFileStream);
+  end;
+  // Line break
+  line := line + #13 + #10;
+
+  fsobj.Write(line[1], Length(line));
+end;
+
+procedure TWAInterpreter.ExecFSeek;
+var fn: String;
+    fsobj: TFileStream;
+    linenum: Integer;
+    ch: Char;
+begin
+  // Filename
+  if Next <> T_STRING then Error(ERROR_STR);
+  fn := Lowercase(BuildString);
+
+  // Line number
+  if Next <> T_INTEGER then Error('Expected integer');
+  linenum := StrToInt(FParser^.GetString);
+
+  CheckEOL;
+
+  if not FStreams.Exists(fn) then begin
+    if (FileExists(fn)) then
+      fsobj := TFileStream.Create(fn, fmOpenReadWrite or fmShareDenyNone)
+    else
+      fsobj := TFileStream.Create(fn, fmCreate or fmOpenReadWrite or fmShareDenyNone);
+    FStreams.Add(fn, fsobj);
+  end else begin
+    fsobj := (FStreams.GetData(fn) as TFileStream);
+  end;
+
+  // Seek beginning
+  fsobj.Seek(0, soBeginning);
+
+  // Read one line at a time
+  while (fsobj.Position < fsobj.Size) and (linenum > 0) do begin
+    fsobj.Read(ch, 1);
+    if ch = #10 then begin
+      Dec(linenum);
+      fsobj.Read(ch, 1);  // skip ahead by 1
+    end;
+  end;
 end;
 
 procedure TWAInterpreter.ExecutePreProc;
@@ -392,6 +543,9 @@ begin
       Sleep(StrToInt(tmp)*1000);
     end;
     T_DUMP: ExecDump;
+    T_PROMPT: ExecPrompt;
+    T_RUN: ExecRun;
+    T_QUIT: Halt;
     T_INCLUDE: ExecInclude;
     T_ECHO: ExecEcho;
     T_REFERRER: ExecReferrer;
@@ -410,8 +564,13 @@ begin
     T_HTMLPARSE: ExecParse;
     T_ENCODE: ExecEncode;
     T_BASENAME: ExecBasename;
+    T_FREADLN: ExecFReadLine;
+    T_FSEEK: ExecFSeek;
+    T_FWRITELN: ExecFWriteLine;
     else begin
       Error('Unknown preprocessor statement');
+      while FTok <> T_EOL do Next;
+      Exit;
     end;
   end;
 end;
@@ -434,6 +593,26 @@ begin
   end;
   FParser^.PopInfo;
   //FParser^.NextLine;
+end;
+
+procedure TWAInterpreter.BeginImmediate;
+begin
+  if FParser <> nil then FParserList.Add(FParser);
+  New(FParser);
+  Immediate := True;
+  FParser^ := TWAParser.Create;
+end;
+
+procedure TWAInterpreter.Interpret (const Line: String);
+begin
+  FParser^.InitParser;
+  FParser^.SetLine(Line);
+  Next;
+  while FTok <> T_EOF do begin
+    BlockExec;
+    FParser^.NextLine;
+    Next;
+  end;
 end;
 
 procedure TWAInterpreter.Execute (const Fn: String);
@@ -477,8 +656,11 @@ end;
 
 procedure TWAInterpreter.ExecEcho;
 begin
-  if Next <> T_STRING then Error(ERROR_STR);  // get echo string
-  Writeln(BuildString);
+  if Next <> T_STRING then
+    Error(ERROR_STR)  // get echo string
+  else begin
+    Writeln(BuildString);
+  end;                   
   CheckEOL;
 end;
 
@@ -554,6 +736,37 @@ begin
   Result := nil;
   try
     Result := TCSVIterator.Create(fn, fields);
+  except on E: Exception do
+    Error('Cannot open file "'+Fn+'"');
+  end;
+end;
+
+function TWAInterpreter.ExecRealCSV: TRealCSVIterator;
+var
+ fields: TStringList;
+ fn: String;
+begin
+  // ... real-csv "file" [defined {struct,x,y,...}]
+  if Next <> T_STRING then Error(ERROR_FILE);
+  fn := BuildString;
+  fields := TStringList.Create;
+  if FParser^.Peek = T_DEFINED then begin
+    Next; // "defined"
+    if Next <> T_LBRACE then Error('Expected "{"');
+    Next;
+    if FTok <> T_STRUCTVAR then Error('Structure variable expected');
+    fields.Add(lowercase(FParser^.GetString));
+    Next;
+    while FTok = T_COMMA do begin
+      if Next <> T_STRUCTVAR then Error('Structure variable expected');
+      fields.Add(lowercase(FParser^.GetString));
+      Next;  // either ',' or '}'
+    end;
+    if FTok <> T_RBRACE then Error('Expected "}"');
+  end;
+  Result := nil;
+  try
+    Result := TRealCSVIterator.Create(fn, fields);
   except on E: Exception do
     Error('Cannot open file "'+Fn+'"');
   end;
@@ -724,6 +937,7 @@ begin
   // foreach {
   case Next of
     T_CSV: iter := ExecCSV;
+    T_REALCSV: iter := ExecRealCSV;
     T_TEXT: iter := ExecText;
   end;
   if Next <> T_LBRACE then Error('Expected "{"');

@@ -32,6 +32,10 @@ type
   public
     constructor Create;
     destructor Destroy; override;
+
+    procedure SetLine (const S: String);
+    procedure InitParser;
+
     procedure LoadFromFile (const Fn: String);
     function GetToken: Integer;
     function GetString: String;
@@ -91,6 +95,13 @@ const
   T_SLEEP = 39;
   T_INTEGER = 40;
   T_DUMP = 41;
+  T_PROMPT = 42;
+  T_RUN = 43;
+  T_QUIT = 44;
+  T_FREADLN = 45;
+  T_FSEEK = 46;
+  T_FWRITELN = 47;
+  T_REALCSV = 48;
 
 implementation
 
@@ -99,6 +110,7 @@ begin
   inherited Create;
   FCode := TStringList.Create;
   FPosits := TList.Create;
+  FFile := 'memory://';
 end;
 
 destructor TWAParser.Destroy;
@@ -176,6 +188,13 @@ begin
     else if k = 'pause' then Result := T_PAUSE
     else if k = 'sleep' then Result := T_SLEEP
     else if k = 'dump' then Result := T_DUMP
+    else if k = 'prompt' then Result := T_PROMPT
+    else if k = 'run' then Result := T_RUN
+    else if k = 'quit' then Result := T_QUIT
+    else if k = 'freadline' then Result := T_FREADLN
+    else if k = 'fseek' then Result := T_FSEEK
+    else if k = 'fwriteline' then Result := T_FWRITELN
+    else if k = 'realcsv' then Result := T_REALCSV
     else Result := T_STRUCTVAR;
   end else Result := T_JUNK;
 end;
@@ -296,12 +315,24 @@ begin
   FSt := tmpSt;
 end;
 
-procedure TWAParser.LoadFromFile (const Fn: String);
+procedure TWAParser.InitParser;
 begin
-  FCode.LoadFromFile(Fn);
   FPos := 1;
   FLine := 0;
   FSt := 1;
+end;
+
+procedure TWAParser.SetLine (const S: String);
+begin
+  FCode.Clear;
+  FCode.Add(S);
+end;
+
+procedure TWAParser.LoadFromFile (const Fn: String);
+begin
+  Self.FFile := Fn;
+  FCode.LoadFromFile(Fn);
+  InitParser;
 end;
 
 procedure TWAParser.PushInfo;

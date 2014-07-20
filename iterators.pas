@@ -44,6 +44,23 @@ type
     property Fields[Index: Integer]: String read GetField;
   end;
 
+  // TRealCSVIterator
+  TRealCSVIterator = class(TBaseIterator)
+  private
+    FFields: TStringList;
+    FCode: TStringList;
+    FLine: Integer;
+
+    function GetField (Index: Integer): String;
+  public
+    constructor Create (Fn: String; var Fields: TStringList);
+    destructor Destroy; override;
+    function NextValueSet: Pointer; override;
+    function Eof: Boolean; override;
+    function HasNext: Boolean; override;
+    property Fields[Index: Integer]: String read GetField;
+  end;
+
 implementation
 
 function TBaseIterator.NextValueSet: Pointer;
@@ -146,6 +163,67 @@ begin
 end;
 
 function TCSVIterator.Eof: Boolean;
+begin
+  Result := FLine >= FCode.Count;
+end;
+
+// TRealCSVIterator
+
+constructor TRealCSVIterator.Create (Fn: String; var Fields: TStringList);
+var fl: PStringList;
+begin
+  inherited Create;
+  FCode := TStringList.Create;
+  FLine := -1;
+  FCode.LoadFromFile(fn);
+  FFields := TStringList.Create;
+  FFields.AddStrings(Fields);
+
+  // Read first line
+  Inc(FLine);
+
+  // Add if no fields defined
+  if FFields.Count = 0 then begin
+    fl := CSVSplit(FCode.Strings[FLine]);
+    FFields.AddStrings(fl^);
+    fl^.Free;
+  end;
+end;
+
+destructor TRealCSVIterator.Destroy;
+begin
+  FCode.Free;
+  FFields.Free;
+  inherited Destroy;
+end;
+
+function TRealCSVIterator.GetField (Index: Integer): String;
+begin
+  Result := FFields.Strings[Index];
+end;
+
+function TRealCSVIterator.HasNext: Boolean;
+begin
+  Result := FLine+1 < FCode.Count;
+end;
+
+function TRealCSVIterator.NextValueSet: Pointer;
+//var sl: PStringList;
+begin
+  Inc(FLine);
+  if Eof then begin
+    Result := nil;
+    Exit;
+  end;
+
+  //New(sl);
+  // Might cause some damage depending on whether Delphi decides to GC this
+  //sl^ := TStringList.Create;
+  Result := CSVSplit(FCode.Strings[FLine]);
+  //Result := sl;
+end;
+
+function TRealCSVIterator.Eof: Boolean;
 begin
   Result := FLine >= FCode.Count;
 end;

@@ -25,7 +25,7 @@ uses
   csv in 'csv.pas';
 
 const
-  VERSION = '1.2.3';
+  VERSION = '1.2.6';
 
 var
  cmd: TAlWinHttpClient;
@@ -40,14 +40,23 @@ var
  tmpj: Integer;
 
 procedure ShowHelp;
+var cmd: String;
 begin
   Writeln(Format('Euphora - Version %s', [VERSION]));
   Writeln('An automated web browsing language & interpreter');
-  Writeln('(C) 2013 Data Components Software');
+  Writeln('(C) 2013-2014 Data Components Software');
   Writeln;
-  Writeln('Expected script filename parameter!');
-  Writeln('Usage: '+ExtractFileName(ParamStr(0))+' <script>');
-  Writeln(#9'<script> = relative/absolute path to Euphora script');
+  Writeln('- Live Interpreter (Type "@quit" to quit) -');
+
+  wa.BeginImmediate;
+
+  Write('>> ');
+  Readln(cmd);
+  while cmd <> '' do begin
+    wa.Interpret(cmd);
+    Write('>> ');
+    Readln(cmd);
+  end;
 end;
 
 procedure CheckRef;
@@ -238,11 +247,6 @@ begin
 end;
 
 begin
-  if (ParamStr(1) = '') or (not FileExists(ParamStr(1))) then begin
-    ShowHelp;
-    Halt;
-  end;
-
   NoRef := False;
   postdata := TAlStringList.Create;
   cmd := TAlWinHttpClient.Create(nil);
@@ -274,5 +278,11 @@ begin
   wa.OnFile := AddPostFile;
   wa.OnDownload := DownloadURL;
   wa.OnDump := DumpFile;
-  wa.Execute(ParamStr(1));
+
+  if (ParamStr(1) = '') or (not FileExists(ParamStr(1))) then begin
+    ShowHelp;
+    Halt;
+  end else begin
+    wa.Execute(ParamStr(1));
+  end;
 end.
