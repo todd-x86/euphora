@@ -44,6 +44,7 @@ type
     FOnParse: TParseEvent;
     FOnEncode: TParseEvent;
     FOnDump: TSetStringEvent;
+    FOnAuth: TSetBoolEvent;
 
     FParserList: TList;
     FParser: PWAParser;
@@ -93,12 +94,14 @@ type
     procedure ExecRun;
     procedure ExecFReadLine;
     procedure ExecFWriteLine;
+    procedure ExecAuth;
     procedure ExecFSeek;
     procedure VMsg (M: String; p: array of const);
   public
     constructor Create;
     destructor Destroy; override;
     procedure Execute (const Fn: String);
+    function GetVariable (N: String): String;
     procedure SetVariable (N, V: String);
 
 
@@ -120,6 +123,7 @@ type
     property OnParse: TParseEvent read FOnParse write FOnParse;
     property OnEncode: TParseEvent read FOnEncode write FOnEncode;
     property OnDump: TSetStringEvent read FOnDump write FOnDump;
+    property OnAuth: TSetBoolEvent read FOnAuth write FOnAuth;
   end;
 
 implementation
@@ -525,6 +529,16 @@ begin
   end;
 end;
 
+procedure TWAInterpreter.ExecAuth;
+begin
+  case Next of
+    T_OFF: if Assigned(FOnAuth) then FOnAuth(False);
+    T_ON: if Assigned(FOnAuth) then FOnAuth(True);
+    else Error(ERROR_BOOL);
+  end;
+  CheckEOL;
+end;
+
 procedure TWAInterpreter.ExecutePreProc;
 var tmp: String;
 begin
@@ -567,6 +581,7 @@ begin
     T_FREADLN: ExecFReadLine;
     T_FSEEK: ExecFSeek;
     T_FWRITELN: ExecFWriteLine;
+    T_AUTH: ExecAuth;
     else begin
       Error('Unknown preprocessor statement');
       while FTok <> T_EOL do Next;
@@ -950,6 +965,11 @@ end;
 procedure TWAInterpreter.SetVariable (N, V: String);
 begin
   FVars.Add(N, V);
+end;
+
+function TWAInterpreter.GetVariable (N: String): String;
+begin
+  Result := FVars.GetData(N);
 end;
 
 end.

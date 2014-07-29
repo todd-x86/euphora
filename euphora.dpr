@@ -16,6 +16,7 @@ uses
   AlFcnMime,
   AlMultiPartFormDataParser,
   AlHttpCommon,
+  OverbyteIcsHttpProt,
   OverbyteIcsSmtpProt,
   parser in 'parser.pas',
   interpreter in 'interpreter.pas',
@@ -25,7 +26,7 @@ uses
   csv in 'csv.pas';
 
 const
-  VERSION = '1.2.6';
+  VERSION = '1.2.7';
 
 var
  cmd: TAlWinHttpClient;
@@ -38,6 +39,7 @@ var
  postdata: TALStringList;
  LastRef: String;
  tmpj: Integer;
+ Auth: Boolean;
 
 procedure ShowHelp;
 var cmd: String;
@@ -72,6 +74,11 @@ begin
 
   if hdr <> nil then hdr.Free;
   hdr := TALHTTPResponseHeader.Create;
+
+  if Auth then begin
+    cmd.RequestHeader.Authorization := 'Basic ' + EncodeStr(encBase64, wa.GetVariable('__auth_user')+':'+wa.GetVariable('__auth_pass'));
+  end;
+
   try
     cmd.Get(URL, membuf, hdr);
   except on E: EALHTTPClientException do
@@ -89,6 +96,11 @@ begin
 
   if hdr <> nil then hdr.Free;
   hdr := TALHTTPResponseHeader.Create;
+
+  if Auth then begin
+    cmd.RequestHeader.Authorization := 'Basic ' + EncodeStr(encBase64, wa.GetVariable('__auth_user')+':'+wa.GetVariable('__auth_pass'));
+  end;
+
   if files.Count > 0 then
     try
       cmd.PostMultiPartFormData(URL, postdata, files, membuf, hdr);
@@ -236,6 +248,11 @@ begin
   fs.Free;
 end;
 
+procedure DoAuth (const Authorization: Boolean);
+begin
+  Auth := Authorization;
+end;
+
 procedure DumpFile (const F: String);
 begin
   membuf.SaveToFile(F);
@@ -256,6 +273,7 @@ begin
   hdr := nil;
   files := TALMultiPartFormDataContents.Create;
   membuf := TMemoryStream.Create;
+  Auth := False;
 
   wa := TWAInterpreter.Create;
 
@@ -278,6 +296,7 @@ begin
   wa.OnFile := AddPostFile;
   wa.OnDownload := DownloadURL;
   wa.OnDump := DumpFile;
+  wa.OnAuth := DoAuth;
 
   if (ParamStr(1) = '') or (not FileExists(ParamStr(1))) then begin
     ShowHelp;
