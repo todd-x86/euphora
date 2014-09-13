@@ -103,6 +103,7 @@ const
   T_FWRITELN = 47;
   T_REALCSV = 48;
   T_AUTH = 49;
+  T_CONFIG = 50;
 
 implementation
 
@@ -197,6 +198,7 @@ begin
     else if k = 'fwriteline' then Result := T_FWRITELN
     else if k = 'realcsv' then Result := T_REALCSV
     else if k = 'authorization' then Result := T_AUTH
+    else if k = 'config' then Result := T_CONFIG
     else Result := T_STRUCTVAR;
   end else Result := T_JUNK;
 end;

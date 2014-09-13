@@ -26,7 +26,7 @@ uses
   csv in 'csv.pas';
 
 const
-  VERSION = '1.2.7';
+  VERSION = '1.3';
 
 var
  cmd: TAlWinHttpClient;
@@ -75,8 +75,9 @@ begin
   if hdr <> nil then hdr.Free;
   hdr := TALHTTPResponseHeader.Create;
 
+  // TODO: Move GetConfigs to a persisted Auth object
   if Auth then begin
-    cmd.RequestHeader.Authorization := 'Basic ' + EncodeStr(encBase64, wa.GetVariable('__auth_user')+':'+wa.GetVariable('__auth_pass'));
+    cmd.RequestHeader.Authorization := 'Basic ' + EncodeStr(encBase64, wa.GetConfig('AuthUsername')+':'+wa.GetConfig('AuthPassword'));
   end;
 
   try
@@ -97,8 +98,9 @@ begin
   if hdr <> nil then hdr.Free;
   hdr := TALHTTPResponseHeader.Create;
 
+  // TODO: Move GetConfigs to a persisted Auth object
   if Auth then begin
-    cmd.RequestHeader.Authorization := 'Basic ' + EncodeStr(encBase64, wa.GetVariable('__auth_user')+':'+wa.GetVariable('__auth_pass'));
+    cmd.RequestHeader.Authorization := 'Basic ' + EncodeStr(encBase64, wa.GetConfig('AuthUsername')+':'+wa.GetVariable('AuthPassword'));
   end;
 
   if files.Count > 0 then
@@ -234,6 +236,20 @@ begin
   files.Add(mpfd);
 end;
 
+procedure SetConfig (const Key, Value: String);
+begin
+  if Key = 'ProxyServer' then begin
+    cmd.ProxyParams.ProxyBypass := Value;
+    cmd.ProxyParams.ProxyServer := Value;
+  end else if Key = 'ProxyUsername' then begin
+    cmd.ProxyParams.ProxyUserName := Value;
+  end else if Key = 'ProxyPassword' then begin
+    cmd.ProxyParams.ProxyPassword := Value;
+  end else if Key = 'ProxyPort' then begin
+    cmd.ProxyParams.ProxyPort := StrToInt(Value);
+  end;
+end;
+
 procedure DownloadURL (const URL, Fn: String);
 var fs: TFileStream;
 begin
@@ -297,6 +313,7 @@ begin
   wa.OnDownload := DownloadURL;
   wa.OnDump := DumpFile;
   wa.OnAuth := DoAuth;
+  wa.OnConfig := SetConfig;
 
   if (ParamStr(1) = '') or (not FileExists(ParamStr(1))) then begin
     ShowHelp;

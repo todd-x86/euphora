@@ -45,11 +45,13 @@ type
     FOnEncode: TParseEvent;
     FOnDump: TSetStringEvent;
     FOnAuth: TSetBoolEvent;
+    FOnConfig: TSetCookieEvent;
 
     FParserList: TList;
     FParser: PWAParser;
     FVars: TStringHashTable;
     FStreams: TObjectHashTable;
+    FConfig: TStringHashTable;
     FTok: Integer;
     FVerbose: Boolean;
     procedure DoLookup (Fn: String; var Fields: TStringList; key,value: String);
@@ -86,6 +88,7 @@ type
     function BuildTemplate (Fn: String): String;
     function TemplateStr (S: String; Explicit: Boolean = True): String;
     procedure ExecField;
+    procedure ExecConfig;
     procedure ExecDownload;
     procedure ExecFile;
     procedure ExecParse;
@@ -96,11 +99,13 @@ type
     procedure ExecFWriteLine;
     procedure ExecAuth;
     procedure ExecFSeek;
+    procedure SetConfig (key, value: String);
     procedure VMsg (M: String; p: array of const);
   public
     constructor Create;
     destructor Destroy; override;
     procedure Execute (const Fn: String);
+    function GetConfig (N: String): String;
     function GetVariable (N: String): String;
     procedure SetVariable (N, V: String);
 
@@ -124,6 +129,7 @@ type
     property OnEncode: TParseEvent read FOnEncode write FOnEncode;
     property OnDump: TSetStringEvent read FOnDump write FOnDump;
     property OnAuth: TSetBoolEvent read FOnAuth write FOnAuth;
+    property OnConfig: TSetCookieEvent read FOnConfig write FOnConfig;
   end;
 
 implementation
@@ -144,6 +150,10 @@ begin
   Immediate := False;
   FVars := TStringHashTable.Create;
   FStreams := TObjectHashTable.Create;
+  FConfig := TStringHashTable.Create;
+
+  // 1 MB limit
+  SetConfig('StringLengthLimit', IntToStr(1024*1024));
 end;
 
 destructor TWAInterpreter.Destroy;
@@ -160,6 +170,12 @@ begin
   Writeln(Format('[%s]: %s', [FormatDateTime('hh:nn:ss', Now), Format(M, p)]));
 end;
 
+procedure TWAInterpreter.SetConfig (key, value: String);
+begin
+  FConfig.Add(key, value);
+  if Assigned(FOnConfig) then FOnConfig(key, value);
+end;
+
 procedure TWAInterpreter.ExecParse;
 var html,id:String;
 begin
@@ -168,7 +184,7 @@ begin
   html := BuildString;
   if Next <> T_STRING then Error(ERROR_STR);
   id := BuildString;
-  if Assigned(FOnParse) then FVars.Add(id, FOnParse(html));
+  if Assigned(FOnParse) then SetVariable(id, FOnParse(html));
   CheckEOL;
 end;
 
@@ -201,7 +217,7 @@ begin
   id := BuildString;
   if Next <> T_STRING then Error(ERROR_STR);
   data := BuildString;
-  FVars.Add(id, ExtractFileName(data));
+  SetVariable(id, ExtractFileName(data));
   CheckEOL;
 end;
 
@@ -215,6 +231,17 @@ begin
     Error('Cannot open file "'+Fn+'"');
   end;
   Result := TemplateStr(sl.Text, False);
+end;
+
+procedure TWAInterpreter.ExecConfig;
+var key, value: String;
+begin
+  if Next <> T_STRING then Error(ERROR_STR);
+  key := BuildString;
+  if Next <> T_STRING then Error(ERROR_STR);
+  value := BuildString;
+  SetConfig(key, value);
+  CheckEOL;
 end;
 
 procedure TWAInterpreter.ExecField;
@@ -268,19 +295,19 @@ begin
     sl := (Iter as TCSVIterator).NextValueSet;
     // Load all values from the fields into the var table...
     for j := 0 to sl^.Count-1 do begin
-      FVars.Add((Iter as TCSVIterator).Fields[j], sl^.Strings[j]);
+      SetVariable((Iter as TCSVIterator).Fields[j], sl^.Strings[j]);
     end;
   end else if Iter is TRealCSVIterator then begin
     sl := (Iter as TRealCSVIterator).NextValueSet;
     // Load all values from the fields into the var table...
     for j := 0 to sl^.Count-1 do begin
-      FVars.Add((Iter as TRealCSVIterator).Fields[j], sl^.Strings[j]);
+      SetVariable((Iter as TRealCSVIterator).Fields[j], sl^.Strings[j]);
     end;
   end else if Iter is TTextIterator then begin
     // Dump value from text file into variable associated with it...
     tmp := (Iter as TTextIterator).NextValueSet;
     tmp2 := StrPas(tmp);
-    FVars.Add((Iter as TTextIterator).VarName, tmp2);
+    SetVariable((Iter as TTextIterator).VarName, tmp2);
   end;
 end;
 
@@ -316,7 +343,7 @@ begin
   end;
   // Add all values from in the lookup and store them to the variable table
   for j := 0 to Fields.Count-1 do begin
-    FVars.Add(Trim(Fields.Strings[j]), l.Data[j]);
+    SetVariable(Trim(Fields.Strings[j]), l.Data[j]);
   end;
 end;
 
@@ -352,7 +379,7 @@ begin
       end;
       // "{...}"
       if (j <= Length(S)) and (S[j] = '}') then begin
-        tmp := Lowercase(Copy(S, st, j-st));
+        tmp := Copy(S, st, j-st);
         if FVars.Exists(tmp) then begin  // Check if var exists
           Result := Result + FVars.GetData(tmp);
         end else begin
@@ -378,7 +405,7 @@ begin
   id := BuildString;
   if Next <> T_STRING then Error(ERROR_STR);
   txt := BuildString;
-  if Assigned(FOnEncode) then FVars.Add(id, FOnEncode(txt));
+  if Assigned(FOnEncode) then SetVariable(id, FOnEncode(txt));
   CheckEOL;
 end;
 
@@ -413,7 +440,7 @@ begin
   CheckEOL;
   Write(msg);
   Readln(tmp);
-  FVars.Add(kw, tmp);
+  SetVariable(kw, tmp);
 end;
 
 procedure TWAInterpreter.ExecRun;
@@ -582,6 +609,7 @@ begin
     T_FSEEK: ExecFSeek;
     T_FWRITELN: ExecFWriteLine;
     T_AUTH: ExecAuth;
+    T_CONFIG: ExecConfig;
     else begin
       Error('Unknown preprocessor statement');
       while FTok <> T_EOL do Next;
@@ -705,7 +733,7 @@ begin
   key := BuildString;
   if Next <> T_STRING then Error(ERROR_STR);
   value := BuildString;
-  FVars.Add(key, value);
+  SetVariable(key, value);
   CheckEOL;
 end;
 
@@ -873,7 +901,7 @@ begin
   name := BuildString;
 
   if Assigned(FOnScrape) then begin
-    FVars.Add(name, FOnScrape(s1, s2));
+    SetVariable(name, FOnScrape(s1, s2));
   end;
   CheckEOL;
 end;
@@ -889,7 +917,7 @@ begin
   if Next <> T_STRING then Error(ERROR_STR);
   id := BuildString;
 
-  FVars.Add(id, DoFSLookup(path, cmp));
+  SetVariable(id, DoFSLookup(path, cmp));
   CheckEOL;
 end;
 
@@ -897,11 +925,11 @@ procedure TWAInterpreter.ExecMail;
 var m: TMailInfo;
 begin
   // mail "to" "subject" "template_file"
-  m.SMTPServer := FVars.GetData('__mail_server');
-  m.SMTPUser := FVars.GetData('__mail_user');
-  m.SMTPPass := FVars.GetData('__mail_pass');
-  m.SMTPPort := FVars.GetData('__mail_port');
-  m.MailFrom := FVars.GetData('__mail_from');
+  m.SMTPServer := FConfig.GetData('MailServer');
+  m.SMTPUser := FConfig.GetData('MailUsername');
+  m.SMTPPass := FConfig.GetData('MailPassword');
+  m.SMTPPort := FConfig.GetData('MailPort');
+  m.MailFrom := FConfig.GetData('MailFrom');
   if Next <> T_STRING then Error(ERROR_STR);
   m.MailTo := BuildString;
   if Next <> T_STRING then Error(ERROR_STR);
@@ -963,13 +991,28 @@ begin
 end;
 
 procedure TWAInterpreter.SetVariable (N, V: String);
+var len: Integer;
 begin
-  FVars.Add(N, V);
+  if (FConfig.Exists('StringLengthLimit')) then begin
+    try
+      len := StrToInt(FConfig.GetData('StringLengthLimit'));
+      if (len > 0) and (Length(V) > len) then
+        Error(Format('Length of `%s` exceeds StringLengthLimit config (%d bytes)', [N, len]))
+      else
+        FVars.Add(N, V);
+    except on E: EConvertError do Error('StringLengthLimit config contains non-integer value');
+    end;
+  end;
 end;
 
 function TWAInterpreter.GetVariable (N: String): String;
 begin
   Result := FVars.GetData(N);
+end;
+
+function TWAInterpreter.GetConfig (N: String): String;
+begin
+  Result := FConfig.GetData(N);
 end;
 
 end.
