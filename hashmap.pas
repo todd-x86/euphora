@@ -6,7 +6,6 @@ uses Classes, SysUtils, Contnrs, Math;
 
 type
   THashNode = packed record
-    Resized: Boolean;
     Key: String;
     case ValueType: Byte of
       0: (ValueString: PChar);
@@ -17,7 +16,6 @@ type
 
   TAbstractHashTable = class(TObject)
   protected
-    FResizeFlag: Boolean;
     FContents: array of PHashNode;
     FSize: Cardinal;
     FUsed: Cardinal;
@@ -48,8 +46,6 @@ function KeyHash (const Key: String): Cardinal;
 
 implementation
 
-{ TStringHashTable }
-
 function KeyHash (const Key: String): Cardinal;
 var g,j: Cardinal;
 begin
@@ -73,7 +69,6 @@ begin
   FUsed := 0;
   FSize := 4;
   Resize;
-  FResizeFlag := False;
 end;
 
 destructor TAbstractHashTable.Destroy;
@@ -97,7 +92,6 @@ end;
 function TAbstractHashTable.AddNode (N: PHashNode): Cardinal;
 var j: Cardinal;
 begin
-  N^.Resized := FResizeFlag;
   j := GetIndex(N^.Key);
 
   // Find the next cell available (nothing fancy...)
@@ -121,7 +115,6 @@ begin
   ptrs := TList.Create;
   sz := FSize;
   // Resize flag toggles each time a resize is performed
-  FResizeFlag := not FResizeFlag;
 
   FSize := Trunc(FSize * 1.66);
   FUsed := 0;
@@ -170,7 +163,6 @@ begin
   New(p);
   GetMem(strData, Sizeof(Char)*(Length(Data)+1));
   StrPCopy(strData, Data);
-  p^.Resized := FResizeFlag;
   p^.Key := S;
   p^.ValueType := 0;
   p^.ValueString := strData;
@@ -191,7 +183,6 @@ function TObjectHashTable.Add (const S: String; Data: TObject): Cardinal;
 var p: PHashNode;
 begin
   New(p);
-  p^.Resized := FResizeFlag;
   p^.Key := S;
   p^.ValueType := 1;
   p^.ValueObject := Data;
