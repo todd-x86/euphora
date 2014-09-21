@@ -26,7 +26,7 @@ uses
   csv in 'csv.pas';
 
 const
-  VERSION = '1.3';
+  VERSION = '1.3.1';
 
 var
  cmd: TAlWinHttpClient;
@@ -241,12 +241,15 @@ begin
   if Key = 'ProxyServer' then begin
     cmd.ProxyParams.ProxyBypass := Value;
     cmd.ProxyParams.ProxyServer := Value;
+    cmd.AccessType := wHttpAt_NAMED_PROXY;
   end else if Key = 'ProxyUsername' then begin
     cmd.ProxyParams.ProxyUserName := Value;
   end else if Key = 'ProxyPassword' then begin
     cmd.ProxyParams.ProxyPassword := Value;
   end else if Key = 'ProxyPort' then begin
     cmd.ProxyParams.ProxyPort := StrToInt(Value);
+  end else if Key = 'ProxyName' then begin
+    cmd.ProxyParams.ProxyBypass := Value;
   end;
 end;
 

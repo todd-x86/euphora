@@ -390,7 +390,15 @@ begin
       end;
     end else if (S[j] = '\') and (Explicit) then begin
       Inc(j);
-      Result := Result + S[j];
+      if (S[j] = 'r') then begin
+        Result := Result + #13;
+      end else if (S[j] = 'n') then begin
+        Result := Result + #10;
+      end else if (S[j] = 't') then begin
+        Result := Result + #9;
+      end else begin
+        Result := Result + S[j];
+      end;
     end else begin
       Result := Result + S[j];
     end;
