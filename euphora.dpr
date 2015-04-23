@@ -26,7 +26,7 @@ uses
   csv in 'csv.pas';
 
 const
-  VERSION = '1.3.1';
+  VERSION = '1.3.2';
 
 var
  cmd: TAlWinHttpClient;
@@ -46,7 +46,7 @@ var cmd: String;
 begin
   Writeln(Format('Euphora - Version %s', [VERSION]));
   Writeln('An automated web browsing language & interpreter');
-  Writeln('(C) 2013-2014 Data Components Software');
+  Writeln('(C) 2013-2015 Data Components Software');
   Writeln;
   Writeln('- Live Interpreter (Type "@quit" to quit) -');
 
