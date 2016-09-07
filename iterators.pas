@@ -2,7 +2,7 @@ unit iterators;
 
 interface
 
-uses Classes, SysUtils, csv;
+uses Classes, SysUtils, RegExpr, csv;
 
 type
   TBaseIterator = class(TObject)
@@ -54,6 +54,44 @@ type
     function GetField (Index: Integer): String;
   public
     constructor Create (Fn: String; var Fields: TStringList);
+    destructor Destroy; override;
+    function NextValueSet: Pointer; override;
+    function Eof: Boolean; override;
+    function HasNext: Boolean; override;
+    property Fields[Index: Integer]: String read GetField;
+  end;
+
+  // TRegexIterator
+  TRegexIterator = class(TBaseIterator)
+  private
+    FRegEx: TRegExpr;
+    FFields: TStringList;
+    FCode: TStringList;
+    FLine: Integer;
+
+    function GetField (Index: Integer): String;
+  public
+    constructor Create (Regex, Filename: String; var Fields: TStringList);
+    destructor Destroy; override;
+    function NextValueSet: Pointer; override;
+    function Eof: Boolean; override;
+    function HasNext: Boolean; override;
+    property Fields[Index: Integer]: String read GetField;
+  end;
+
+  // TRegexContextIterator
+  TRegexContextIterator = class(TBaseIterator)
+  private
+    FRegEx: TRegExpr;
+    FFields: TStringList;
+    FCode: TStringList;
+    FLine, FOffset: Integer;
+    FMatch: Boolean;
+
+    procedure FindNext;
+    function GetField (Index: Integer): String;
+  public
+    constructor Create (Regex, Filename: String; var Fields: TStringList);
     destructor Destroy; override;
     function NextValueSet: Pointer; override;
     function Eof: Boolean; override;
@@ -226,6 +264,154 @@ end;
 function TRealCSVIterator.Eof: Boolean;
 begin
   Result := FLine >= FCode.Count;
+end;
+
+// TRegexIterator
+
+constructor TRegexIterator.Create (Regex, Filename: String; var Fields: TStringList);
+begin
+  inherited Create;
+  FRegEx := TRegExpr.Create;
+  FRegEx.Expression := Regex;
+  FCode := TStringList.Create;
+  FCode.LoadFromFile(Filename);
+  FLine := -1;
+  FFields := TStringList.Create;
+  FFields.AddStrings(Fields);
+end;
+
+destructor TRegexIterator.Destroy;
+begin
+  FCode.Free;
+  FFields.Free;
+  FRegex.Free;
+  inherited Destroy;
+end;
+
+function TRegexIterator.GetField (Index: Integer): String;
+begin
+  Result := FFields.Strings[Index];
+end;
+
+function TRegexIterator.HasNext: Boolean;
+begin
+  if FLine < 0 then FLine := 0;
+
+  if Eof then begin
+    Result := False;
+    Exit;
+  end;
+
+  Result := FRegex.Exec(FCode.Strings[FLine]);
+  while (not Eof) and (not Result) do begin
+    Inc(FLine);
+    Result := FRegex.Exec(FCode.Strings[FLine]);
+  end;
+end;
+
+function TRegexIterator.NextValueSet: Pointer;
+var match: Boolean;
+    results: PStringList;
+    j: Integer;
+begin
+  if Eof then begin
+    Result := nil;
+    Exit;
+  end;
+
+  if FLine < 0 then FLine := 0;
+  match := False;
+  while (not Eof) and (not match) do begin
+    match := FRegex.Exec(FCode.Strings[FLine]);
+    Inc(FLine);
+  end;
+  if match then begin
+    New(results);
+    results^ := TStringList.Create;
+    for j := 1 to FRegex.SubExprMatchCount do begin
+      results^.Add(FRegex.Match[j]);
+    end;
+    Result := results;
+  end else Result := nil;
+end;
+
+function TRegexIterator.Eof: Boolean;
+begin
+  Result := FLine >= FCode.Count-1;
+end;
+
+// TRegexContextIterator
+
+constructor TRegexContextIterator.Create (Regex, Filename: String; var Fields: TStringList);
+begin
+  inherited Create;
+  FRegEx := TRegExpr.Create;
+  FRegEx.Expression := Regex;
+  FCode := TStringList.Create;
+  FCode.LoadFromFile(Filename);
+  FLine := 0;
+  FOffset := 1;
+  FFields := TStringList.Create;
+  FFields.AddStrings(Fields);
+  FindNext;
+end;
+
+destructor TRegexContextIterator.Destroy;
+begin
+  FCode.Free;
+  FFields.Free;
+  FRegex.Free;
+  inherited Destroy;
+end;
+
+function TRegexContextIterator.GetField (Index: Integer): String;
+begin
+  Result := FFields.Strings[Index];
+end;
+
+function TRegexContextIterator.HasNext: Boolean;
+begin
+  Result := FMatch;
+end;
+
+function TRegexContextIterator.NextValueSet: Pointer;
+var results: PStringList;
+    j: Integer;
+begin
+  if not FMatch then begin
+    Result := nil;
+    Exit;
+  end;
+
+  New(results);
+  results^ := TStringList.Create;
+  for j := 1 to FRegex.SubExprMatchCount do begin
+    results^.Add(FRegex.Match[j]);
+  end;
+  Result := results;
+
+  FindNext;
+end;
+
+function TRegexContextIterator.Eof: Boolean;
+begin
+  Result := not FMatch;
+end;
+
+procedure TRegexContextIterator.FindNext;
+begin
+  FMatch := False;
+
+  while FLine < FCode.Count do begin
+    FRegex.InputString := FCode[FLine];
+    if (FOffset <= Length(FCode[FLine])) and (FRegex.Exec(FOffset)) then begin
+      FMatch := True;
+      FOffset := FRegex.MatchPos[0] + FRegex.MatchLen[0];
+      Exit;
+    end;
+
+    Inc(FLine);
+  end;
 end;
 
 end.

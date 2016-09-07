@@ -2,7 +2,8 @@ unit interpreter;
 
 interface
 
-uses SysUtils, Classes, hashmap, parser, iterators, lookup, strsim, csv, ShellAPI;
+uses SysUtils, Classes, hashmap, parser, iterators, lookup, strsim,
+     csv, ShellAPI, Windows, RegExpr, frmPreview;
 
 type
   TMailInfo = packed record
@@ -16,19 +17,25 @@ type
     MailBody: String;
   end;
 
+  TStringListEvent = procedure (const Strings: TStringList);
   TSetStringEvent = procedure (const S: String);
   TSetCookieEvent = procedure (const Key, Value: String);
   TSetBoolEvent = procedure (const B: Boolean);
   TScrapeEvent = function (const Start, Stop: String): String;
   TMailEvent = procedure (var MailInfo: TMailInfo);
   TURLEvent = procedure (const URL: String);
-  TDownloadEvent = procedure (const URL, Fn: String);
+  TDownloadEvent = procedure (const URL, Fn: String; const ProgressBar: Boolean);
   TParseEvent = function (const HTMLName: String): String;
+  TRegexEvent = procedure (var Regex: TRegExpr);
+  TDownloadBarEvent = procedure;
 
   TWAInterpreter = class(TObject)
   private
     // Event list
     Immediate: Boolean;
+    FRecord: Boolean;
+    FRecordStream: TFileStream;
+    FOnPreview: TStringListEvent;
     FOnReferrer: TSetBoolEvent;
     FOnRef: TSetStringEvent;
     FOnCookies: TSetBoolEvent;
@@ -46,6 +53,9 @@ type
     FOnDump: TSetStringEvent;
     FOnAuth: TSetBoolEvent;
     FOnConfig: TSetCookieEvent;
+    FOnRegexMatch: TRegexEvent;
+
+    FOnDownloadBar: TDownloadBarEvent;
 
     FParserList: TList;
     FParser: PWAParser;
@@ -54,6 +64,8 @@ type
     FConfig: TStringHashTable;
     FTok: Integer;
     FVerbose: Boolean;
+    FDLRead, FDLTotal: Integer;
+
     procedure DoLookup (Fn: String; var Fields: TStringList; key,value: String);
     procedure CheckEOL;
     procedure ExecutePreProc;
@@ -68,6 +80,8 @@ type
     function ExecRealCSV: TRealCSVIterator;
     function ExecCSV: TCSVIterator;
     function ExecText: TTextIterator;
+    function ExecRegex: TRegexIterator;
+    function ExecRegexContinuous: TRegexContextIterator;
     procedure ExecLookup;
     procedure ExecVerbose;
     procedure ExecCookie;
@@ -78,7 +92,7 @@ type
     procedure ExecPost;
     procedure ExecForeach;
     procedure ExecBasename;
-    function BuildString: String;
+    function BuildString(const IgnoreNumericVars: Boolean = False): String;
     function Next: Integer;
     procedure BlockExec;
     procedure ExecEncode;
@@ -86,7 +100,7 @@ type
     procedure LoadVars (var Iter: TBaseIterator);
     function DoFSLookup (path, cmp: String): String;
     function BuildTemplate (Fn: String): String;
-    function TemplateStr (S: String; Explicit: Boolean = True): String;
+    function TemplateStr (S: String; const IgnoreNumericVars: Boolean = False): String;
     procedure ExecField;
     procedure ExecConfig;
     procedure ExecDownload;
@@ -99,8 +113,17 @@ type
     procedure ExecFWriteLine;
     procedure ExecAuth;
     procedure ExecFSeek;
+    procedure ExecFilterFilename;
+    procedure ExecParseString;
+    procedure ExecMatch;
+    procedure ExecGUIPreview;
+    procedure ExecWordwrap;
+    procedure ExecRecord;
     procedure SetConfig (key, value: String);
     procedure VMsg (M: String; p: array of const);
+    function RemoveChars(const Chars, Input: String): String;
+    function ApplyWordwrap(const Input: String; const Chars: Integer): String;
+    procedure ExecMkdir;
   public
     constructor Create;
     destructor Destroy; override;
@@ -109,10 +132,12 @@ type
     function GetVariable (N: String): String;
     procedure SetVariable (N, V: String);
 
+    procedure OnDownloadProgress(sender: Tobject; Read: Integer; Total: Integer);
 
     procedure Interpret (const Line: String);
     procedure BeginImmediate;
 
+    property OnRegex: TRegexEvent read FOnRegexMatch write FOnRegexMatch;
     property OnReferrer: TSetBoolEvent read FOnReferrer write FOnReferrer;
     property OnRef: TSetStringEvent read FOnRef write FOnRef;
     property OnCookies: TSetBoolEvent read FOnCookies write FOnCookies;
@@ -130,9 +155,16 @@ type
     property OnDump: TSetStringEvent read FOnDump write FOnDump;
     property OnAuth: TSetBoolEvent read FOnAuth write FOnAuth;
     property OnConfig: TSetCookieEvent read FOnConfig write FOnConfig;
+    property OnPreview: TStringListEvent read FOnPreview write FOnPreview;
+    property OnDownloadBar: TDownloadBarEvent read FOnDownloadBar write FOnDownloadBar;
+
+    property DownloadRead: Integer read FDLRead;
+    property DownloadTotal: Integer read FDLTotal;
   end;
 
 implementation
+
+function PathCleanupSpec(pszDir: LPCWSTR; pszSpec: LPWSTR): Integer; stdcall; external 'shell32.dll';
 
 const
   ERROR_EOL = 'End of line expected';
@@ -144,6 +176,8 @@ const
 constructor TWAInterpreter.Create;
 begin
   inherited Create;
+  FRecord := False;
+  FRecordStream := nil;
   FVerbose := False;
   FParserList := TList.Create;
   FParser := nil;
@@ -152,8 +186,16 @@ begin
   FStreams := TObjectHashTable.Create;
   FConfig := TStringHashTable.Create;
 
+  FDLRead := 0;
+  FDLTotal := 0;
+
   // 1 MB limit
   SetConfig('StringLengthLimit', IntToStr(1024*1024));
+  SetConfig('RegexNoMatch', '');
+  SetConfig('Var_MatchStatus', '');
+  SetConfig('Value_MatchTrue', 'true');
+  SetConfig('Value_MatchFalse', 'true');
+  SetConfig('Download_ProgressBar', 'false');
 end;
 
 destructor TWAInterpreter.Destroy;
@@ -163,6 +205,13 @@ begin
   FStreams.Free;
   FVars.Free;
   inherited Destroy;
+end;
+
+procedure TWAInterpreter.OnDownloadProgress(sender: Tobject; Read: Integer; Total: Integer);
+begin
+  FDLRead := Read;
+  FDLTotal := Total;
+  if Assigned(FOnDownloadBar) then FOnDownloadBar;
 end;
 
 procedure TWAInterpreter.VMsg (M: String; p: array of const);
@@ -190,12 +239,14 @@ end;
 
 procedure TWAInterpreter.ExecDownload;
 var url,fn:String;
+    pb: Boolean;
 begin
   if Next <> T_STRING then Error(ERROR_STR);
   url := BuildString;
   if Next <> T_STRING then Error(ERROR_STR);
   fn := BuildString;
-  if Assigned(FOnDownload) then FOnDownload(url, fn);
+  pb := Lowercase(GetConfig('Download_ProgressBar')) = 'true';
+  if Assigned(FOnDownload) then FOnDownload(url, fn, pb);
   CheckEOL;
 end;
 
@@ -210,6 +261,41 @@ begin
   CheckEOL;
 end;
 
+procedure TWAInterpreter.ExecMatch;
+var fmt: String;
+    regex: TRegExpr;
+    j: Integer;
+    matchCondVar: String;
+begin
+  // @match "regex" "output1" [ "output2" ... ]
+  if Next <> T_STRING then Error(ERROR_STR);
+  fmt := BuildString(True);
+
+  regex := TRegExpr.Create;
+  regex.Expression := fmt;
+  regex.Compile;
+
+  FOnRegexMatch(regex);
+
+  j := 1;
+  matchCondVar := GetConfig('Var_MatchStatus');
+  if matchCondVar <> '' then begin
+    if regex.SubExprMatchCount >= 1 then
+      SetVariable(matchCondVar, GetConfig('Value_MatchTrue'))
+    else
+      SetVariable(matchCondVar, GetConfig('Value_MatchFalse'));
+  end;
+  while FParser.Peek = T_STRING do begin
+    Next;
+    if j <= regex.SubExprMatchCount then
+      SetVariable(BuildString, regex.Match[j])
+    else
+      SetVariable(BuildString, GetConfig('RegexNoMatch'));
+    Inc(j);
+  end;
+  CheckEOL;
+end;
+
 procedure TWAInterpreter.ExecBasename;
 var id,data: String;
 begin
@@ -218,6 +304,13 @@ begin
   if Next <> T_STRING then Error(ERROR_STR);
   data := BuildString;
   SetVariable(id, ExtractFileName(data));
+  CheckEOL;
+end;
+
+procedure TWAInterpreter.ExecMkdir;
+begin
+  if Next <> T_STRING then Error(ERROR_STR);
+  ForceDirectories(ExpandFilename(BuildString));
   CheckEOL;
 end;
 
@@ -230,7 +323,7 @@ begin
   except on E: Exception do
     Error('Cannot open file "'+Fn+'"');
   end;
-  Result := TemplateStr(sl.Text, False);
+  Result := TemplateStr(sl.Text);
 end;
 
 procedure TWAInterpreter.ExecConfig;
@@ -282,7 +375,7 @@ begin
     end;
     a := FindNext(sr);
   end;
-  FindClose(sr);
+  FindClose(sr.FindHandle);
 end;
 
 procedure TWAInterpreter.LoadVars (var Iter: TBaseIterator);
@@ -297,12 +390,32 @@ begin
     for j := 0 to sl^.Count-1 do begin
       SetVariable((Iter as TCSVIterator).Fields[j], sl^.Strings[j]);
     end;
+    sl^.Free;
+    FreeMem(sl);
   end else if Iter is TRealCSVIterator then begin
     sl := (Iter as TRealCSVIterator).NextValueSet;
     // Load all values from the fields into the var table...
     for j := 0 to sl^.Count-1 do begin
       SetVariable((Iter as TRealCSVIterator).Fields[j], sl^.Strings[j]);
     end;
+    sl^.Free;
+    FreeMem(sl);
+  end else if Iter is TRegexIterator then begin
+    sl := (Iter as TRegexIterator).NextValueSet;
+    // Load all values from the fields into the var table...
+    for j := 0 to sl^.Count-1 do begin
+      SetVariable((Iter as TRegexIterator).Fields[j], sl^.Strings[j]);
+    end;
+    sl^.Free;
+    FreeMem(sl);
+  end else if Iter is TRegexContextIterator then begin
+    sl := (Iter as TRegexContextIterator).NextValueSet;
+    // Load all values from the fields into the var table...
+    for j := 0 to sl^.Count-1 do begin
+      SetVariable((Iter as TRegexContextIterator).Fields[j], sl^.Strings[j]);
+    end;
+    sl^.Free;
+    FreeMem(sl);
   end else if Iter is TTextIterator then begin
     // Dump value from text file into variable associated with it...
     tmp := (Iter as TTextIterator).NextValueSet;
@@ -334,7 +447,7 @@ var l: TCSVLookup;
 begin
   l := nil;
   try
-    l := TCSVLookup.Create(fn, Fields.IndexOf(key), value);
+    l := TCSVLookup.Create(fn, Fields.IndexOf(key), Lowercase(value));
   except on E: Exception do
     Error('Cannot open file "'+fn+'"');
   end;
@@ -364,9 +477,10 @@ begin
   if not Immediate then Halt;
 end;
 
-function TWAInterpreter.TemplateStr (S: String; Explicit: Boolean): String;
+function TWAInterpreter.TemplateStr (S: String; const IgnoreNumericVars: Boolean): String;
 var j,st: Integer;
     tmp: String;
+    numeric: Boolean;
 begin
   j := 1;
   while j <= Length(S) do begin
@@ -374,13 +488,17 @@ begin
       Inc(j);
       st := j;
       // Parse variable
+      // NOTE: Numeric should be false if nothing is there...
+      numeric := (j <= Length(S)) and (S[j] <> '}');
       while (j <= Length(S)) and (S[j] <> '}') do begin
+        numeric := numeric and (S[j] in ['0'..'9']);
         Inc(j);
       end;
+
       // "{...}"
       if (j <= Length(S)) and (S[j] = '}') then begin
         tmp := Copy(S, st, j-st);
-        if FVars.Exists(tmp) then begin  // Check if var exists
+        if (not IgnoreNumericVars or not numeric) and (FVars.Exists(tmp)) then begin  // Check if var exists
           Result := Result + FVars.GetData(tmp);
         end else begin
           Result := Result + Copy(S, st-1, j-st+2);
@@ -388,7 +506,7 @@ begin
       end else begin  // "{..."
         Result := Result + Copy(S, st, j-st-1);
       end;
-    end else if (S[j] = '\') and (Explicit) then begin
+    end else if (S[j] = '\') then begin
       Inc(j);
       if (S[j] = 'r') then begin
         Result := Result + #13;
@@ -417,7 +535,7 @@ begin
   CheckEOL;
 end;
 
-function TWAInterpreter.BuildString: String;
+function TWAInterpreter.BuildString(const IgnoreNumericVars: Boolean): String;
 var buf: String;
 begin
   buf := FParser^.GetString;
@@ -428,7 +546,7 @@ begin
     Result := '';
   end
   else
-    Result := TemplateStr(Copy(buf, 2, length(buf)-2));
+    Result := TemplateStr(Copy(buf, 2, length(buf)-2), IgnoreNumericVars);
 end;
 
 procedure TWAInterpreter.ExecDump;
@@ -515,6 +633,7 @@ begin
       fsobj := TFileStream.Create(fn, fmOpenReadWrite or fmShareDenyNone)
     else
       fsobj := TFileStream.Create(fn, fmCreate or fmOpenReadWrite or fmShareDenyNone);
+    fsobj.Position := fsobj.Size;
     FStreams.Add(fn, fsobj);
   end else begin
     fsobj := (FStreams.GetData(fn) as TFileStream);
@@ -564,6 +683,55 @@ begin
   end;
 end;
 
+function TWAInterpreter.RemoveChars(const Chars, Input: String): String;
+var j: Integer;
+begin
+  Result := '';
+  for j := 1 to Length(Input) do begin
+    if Pos(Input[j], Chars) < 1 then Result := Result + Input[j]
+    else Result := Result + ' ';
+  end;
+end;
+
+procedure TWAInterpreter.ExecFilterFilename;
+var data: String;
+begin
+  // @filter-filename "data" "out-var"
+  if Next <> T_STRING then Error(ERROR_STR);
+  data := RemoveChars('\/:*?"<>|', BuildString);
+  if Next <> T_STRING then Error(ERROR_STR);
+  SetVariable(BuildString, data);
+  CheckEOL;
+end;
+
+procedure TWAInterpreter.ExecParseString;
+var data, fmt: String;
+    regex: TRegExpr;
+    j: Integer;
+begin
+  // @parse-string "data" "d([A-Za-z])ta" "output1" [ "output2" ... ]
+  if Next <> T_STRING then Error(ERROR_STR);
+  data := BuildString;
+  if Next <> T_STRING then Error(ERROR_STR);
+  fmt := BuildString(True);
+
+  regex := TRegExpr.Create;
+  regex.Expression := fmt;
+  regex.Compile;
+  regex.Exec(data);
+
+  j := 1;
+  while FParser.Peek = T_STRING do begin
+    Next;
+    if j <= regex.SubExprMatchCount then
+      SetVariable(BuildString, regex.Match[j])
+    else
+      SetVariable(BuildString, GetConfig('RegexNoMatch'));
+    Inc(j);
+  end;
+  CheckEOL;
+end;
+
 procedure TWAInterpreter.ExecAuth;
 begin
   case Next of
@@ -590,6 +758,12 @@ begin
       tmp := FParser^.GetString;
       CheckEOL;
       Sleep(StrToInt(tmp)*1000);
+    end;
+    T_MSLEEP: begin
+      if Next <> T_INTEGER then Error('Integer value expected');
+      tmp := FParser^.GetString;
+      CheckEOL;
+      Sleep(StrToInt(tmp));
     end;
     T_DUMP: ExecDump;
     T_PROMPT: ExecPrompt;
@@ -618,6 +792,13 @@ begin
     T_FWRITELN: ExecFWriteLine;
     T_AUTH: ExecAuth;
     T_CONFIG: ExecConfig;
+    T_FILTER_FILENAME: ExecFilterFilename;
+    T_STRPARSE: ExecParseString;
+    T_MATCH: ExecMatch;
+    T_GUI_PREVIEW: ExecGUIPreview;
+    T_WORDWRAP: ExecWordwrap;
+    T_RECORD: ExecRecord;
+    T_MKDIR: ExecMkdir;
     else begin
       Error('Unknown preprocessor statement');
       while FTok <> T_EOL do Next;
@@ -627,7 +808,26 @@ begin
 end;
 
 procedure TWAInterpreter.Iterate (var Iter: TBaseIterator);
+var CountBraces: Integer;
 begin
+  if not Iter.HasNext then begin
+    // Crude way of skipping a foreach loop -- count the number of braces
+    CountBraces := 1;
+    while (CountBraces > 0) and (FParser^.Peek <> T_EOF) do begin
+      Next;
+      case FTok of
+        T_LBRACE: Inc(CountBraces);
+        T_RBRACE: Dec(CountBraces);
+        T_EOL:
+        begin
+          FParser^.NextLine;
+        end;
+      end;
+      //Writeln(Format('Braces=%d, FTok=%d', [CountBraces, FTok]));
+    end;
+    Next;
+    Exit;
+  end;
   // Inform parser we want to begin iteration of a loop (positions stored in stack)
   FParser^.PushInfo;
   while Iter.HasNext do begin
@@ -655,7 +855,12 @@ begin
 end;
 
 procedure TWAInterpreter.Interpret (const Line: String);
+var CLine: String;
 begin
+  if FRecord then begin
+    CLine := Line+#13#10;
+    FRecordStream.Write(CLine[1], Length(CLine));
+  end;
   FParser^.InitParser;
   FParser^.SetLine(Line);
   Next;
@@ -776,11 +981,11 @@ begin
   Next;
   fields := TStringList.Create;
   if FTok <> T_STRUCTVAR then Error('Structure variable expected');
-  fields.Add(lowercase(FParser^.GetString));
+  fields.Add(FParser^.GetString);
   Next;
   while FTok = T_COMMA do begin
     if Next <> T_STRUCTVAR then Error('Structure variable expected');
-    fields.Add(lowercase(FParser^.GetString));
+    fields.Add(FParser^.GetString);
     Next;  // either ',' or '}'
   end;
   if FTok <> T_RBRACE then Error('Expected "}"');
@@ -806,11 +1011,11 @@ begin
     if Next <> T_LBRACE then Error('Expected "{"');
     Next;
     if FTok <> T_STRUCTVAR then Error('Structure variable expected');
-    fields.Add(lowercase(FParser^.GetString));
+    fields.Add(FParser^.GetString);
     Next;
     while FTok = T_COMMA do begin
       if Next <> T_STRUCTVAR then Error('Structure variable expected');
-      fields.Add(lowercase(FParser^.GetString));
+      fields.Add(FParser^.GetString);
       Next;  // either ',' or '}'
     end;
     if FTok <> T_RBRACE then Error('Expected "}"');
@@ -840,6 +1045,70 @@ begin
   end;
 end;
 
+function TWAInterpreter.ExecRegex: TRegexIterator;
+var fn, regex: String;
+    fields: TStringList;
+begin
+  // ... regex "regex" in "filename" defined {x,y}
+  if Next <> T_STRING then Error(ERROR_STR);
+  regex := BuildString;
+  if Next <> T_IN then Error('Expected "in" keyword');
+  if Next <> T_STRING then Error(ERROR_FILE);
+  fn := BuildString;
+
+  if Next <> T_DEFINED then Error('Expected "defined" keyword');
+  if Next <> T_LBRACE then Error('Expected "{"');
+  Next;
+  fields := TStringList.Create;
+  if FTok <> T_STRUCTVAR then Error('Structure variable expected');
+  fields.Add(FParser^.GetString);
+  Next;
+  while FTok = T_COMMA do begin
+    if Next <> T_STRUCTVAR then Error('Structure variable expected');
+    fields.Add(FParser^.GetString);
+    Next;  // either ',' or '}'
+  end;
+  if FTok <> T_RBRACE then Error('Expected "}"');
+  Result := nil;
+  try
+    Result := TRegexIterator.Create(regex, fn, fields);
+  except on E: Exception do
+    Error('Cannot open file "'+Fn+'"');
+  end;
+end;
+
+function TWAInterpreter.ExecRegexContinuous: TRegexContextIterator;
+var fn, regex: String;
+    fields: TStringList;
+begin
+  // ... string-regex "regex" in "filename" defined {x,y}
+  if Next <> T_STRING then Error(ERROR_STR);
+  regex := BuildString;
+  if Next <> T_IN then Error('Expected "in" keyword');
+  if Next <> T_STRING then Error(ERROR_FILE);
+  fn := BuildString;
+
+  if Next <> T_DEFINED then Error('Expected "defined" keyword');
+  if Next <> T_LBRACE then Error('Expected "{"');
+  Next;
+  fields := TStringList.Create;
+  if FTok <> T_STRUCTVAR then Error('Structure variable expected');
+  fields.Add(FParser^.GetString);
+  Next;
+  while FTok = T_COMMA do begin
+    if Next <> T_STRUCTVAR then Error('Structure variable expected');
+    fields.Add(FParser^.GetString);
+    Next;  // either ',' or '}'
+  end;
+  if FTok <> T_RBRACE then Error('Expected "}"');
+  Result := nil;
+  try
+    Result := TRegexContextIterator.Create(regex, fn, fields);
+  except on E: Exception do
+    Error('Cannot open file "'+Fn+'"');
+  end;
+end;
+
 procedure TWAInterpreter.ExecLookup;
 var tfn,key,value: String;
     fields: TStringList;
@@ -853,24 +1122,24 @@ begin
   Next;
   fields := TStringList.Create;
   if FTok <> T_STRUCTVAR then Error('Structure variable expected');
-  fields.Add(lowercase(FParser^.GetString));
+  fields.Add(FParser^.GetString);
   Next;
   while FTok = T_COMMA do begin
     if Next <> T_STRUCTVAR then Error('Structure variable expected');
-    fields.Add(lowercase(FParser^.GetString));
+    fields.Add(FParser^.GetString);
     Next;  // either ',' or '}'
   end;
   if FTok <> T_RBRACE then Error('Expected "}"');
   if Next <> T_WHERE then Error('Expected "where" keyword');
   if Next <> T_STRING then Error(ERROR_STR);
   // Key to lookup
-  key := lowercase(BuildString);
+  key := BuildString;
   // Expect "is"
   if Next <> T_IS then Error('Expected "is" keyword');
 
   // Value to search in key column
   if Next <> T_STRING then Error(ERROR_STR);
-  value := lowercase(BuildString);
+  value := BuildString;
   DoLookup(tfn, fields, key, value);
 
   CheckEOL;
@@ -990,12 +1259,60 @@ begin
     T_CSV: iter := ExecCSV;
     T_REALCSV: iter := ExecRealCSV;
     T_TEXT: iter := ExecText;
+    T_REGEX: iter := ExecRegex;
+    T_STR_REGEX: iter := ExecRegexContinuous;
   end;
   if Next <> T_LBRACE then Error('Expected "{"');
   CheckEOL;
   FParser^.NextLine;
   Iterate(iter);
   //if Next <> T_RBRACE then Error('Expected "}"');
+end;
+
+procedure TWAInterpreter.ExecGUIPreview;
+var frm: TfrmUIPreview;
+begin
+  CheckEOL;
+  frm := TfrmUIPreview.Create(nil);
+  frm.Contents.HTMLCode.Clear;
+  FOnPreview(frm.Contents.HTMLCode);
+  frm.ShowModal;
+end;
+
+procedure TWAInterpreter.ExecWordwrap;
+var data, outputVar: String;
+    chars: Integer;
+begin
+  // @wordwrap "{data}" <chars> "output"
+
+  if Next <> T_STRING then Error(ERROR_STR);
+  data := BuildString;
+  if Next <> T_INTEGER then Error('Expected integer');
+  chars := StrToInt(FParser^.GetString);
+  if Next <> T_STRING then Error(ERROR_STR);
+  outputVar := BuildString;
+  CheckEOL;
+
+  // Apply word-wrap
+  SetVariable(outputVar, ApplyWordwrap(data, chars));
+end;
+
+procedure TWAInterpreter.ExecRecord;
+begin
+  // @record "somefile.txt" | off
+
+  Next;
+  if (FTok = T_OFF) then begin
+    if FRecord then FRecordStream.Free;
+    FRecord := false;
+  end else if FTok = T_STRING then begin
+    if FRecord then FRecordStream.Free;
+
+    FRecord := True;
+    FRecordStream := TFileStream.Create(BuildString, fmCreate or fmShareDenyNone);
+  end else Error('Expected string filename or `off`');
+
+  CheckEOL;
 end;
 
 procedure TWAInterpreter.SetVariable (N, V: String);
@@ -1021,6 +1338,40 @@ end;
 function TWAInterpreter.GetConfig (N: String): String;
 begin
   Result := FConfig.GetData(N);
+end;
+
+function TWAInterpreter.ApplyWordwrap(const Input: String; const Chars: Integer): String;
+var lc,j: Integer;
+    word:String;
+begin
+  // NOTE: This is a crude word-wrapping algorithm
+  //       Clean this up -- code doesn't handle words longer than #Chars...
+  Result := '';
+  // While chars to be processed...
+  j := 1;
+  lc := 0;
+  while j <= Length(Input) do begin
+    word := '';
+    while (j <= Length(Input)) and not (Input[j] in [#9,#10,#13,' ']) do begin
+      word := word + Input[j];
+      Inc(j);
+    end;
+    if lc+Length(word) > Chars then begin
+      Result := Result + #13#10;
+      lc := 0;
+    end;
+    Inc(lc, Length(word));
+    Result := Result + word;
+
+    word := '';
+    while (j <= Length(Input)) and (Input[j] in [#9,#10,#13,' ']) do begin
+      if (lc < Chars) then begin
+        Result := Result + Input[j];
+        Inc(lc);
+      end;
+      Inc(j);
+    end;
+  end;
 end;
 
 end.

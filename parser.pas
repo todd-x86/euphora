@@ -104,6 +104,17 @@ const
   T_REALCSV = 48;
   T_AUTH = 49;
   T_CONFIG = 50;
+  T_FILTER_FILENAME = 51;
+  T_STRPARSE = 52;
+  T_MATCH = 53;
+  T_REGEX = 54;
+  T_IN = 55;
+  T_STR_REGEX = 56;
+  T_MSLEEP = 57;
+  T_GUI_PREVIEW = 58;
+  T_WORDWRAP = 59;
+  T_RECORD = 60;
+  T_MKDIR = 61;
 
 implementation
 
@@ -153,7 +164,7 @@ function TWAParser.ParseKeyword: Integer;
 var k: String;
 begin
   FSt := FPos;
-  while (FPos <= Length(FCode.Strings[FLine])) and ((IsAlpha(FCode.Strings[FLine][FPos])) or (IsNumeric(FCode.Strings[FLine][FPos])) or (FCode.Strings[FLine][FPos] = '_')) do begin
+  while (FPos <= Length(FCode.Strings[FLine])) and ((IsAlpha(FCode.Strings[FLine][FPos])) or (IsNumeric(FCode.Strings[FLine][FPos])) or (FCode.Strings[FLine][FPos] in ['_', '-'])) do begin
     Inc(FPos);
   end;
   if FPos > FSt then begin
@@ -199,6 +210,17 @@ begin
     else if k = 'realcsv' then Result := T_REALCSV
     else if k = 'authorization' then Result := T_AUTH
     else if k = 'config' then Result := T_CONFIG
+    else if k = 'filter-filename' then Result := T_FILTER_FILENAME
+    else if k = 'parse-string' then Result := T_STRPARSE
+    else if k = 'match' then Result := T_MATCH
+    else if k = 'regex' then Result := T_REGEX
+    else if k = 'in' then Result := T_IN
+    else if k = 'string-regex' then Result := T_STR_REGEX
+    else if k = 'msleep' then Result := T_MSLEEP
+    else if k = 'preview' then Result := T_GUI_PREVIEW
+    else if k = 'wordwrap' then Result := T_WORDWRAP
+    else if k = 'record' then Result := T_RECORD
+    else if k = 'mkdir' then Result := T_MKDIR
     else Result := T_STRUCTVAR;
   end else Result := T_JUNK;
 end;
